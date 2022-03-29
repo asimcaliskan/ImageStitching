@@ -9,7 +9,9 @@ if __name__ == "__main__":
     gray_image_array = []
     #TODO: This code must be changed based on max and min image id.
     #TODO: Add a console UI to control the sw
-    for ix in range(15, 20):
+    for ix in range(3, 7):
+        if ix == 2:
+            pass
         image_file_name = "dataset/cyl_image" + ( "0" + str(ix)  if ix < 10 else str(ix)) + ".png"
         image_array.append(imread(image_file_name))  
         gray_image_array.append(cvtColor(image_array[-1], COLOR_BGR2GRAY))      
@@ -27,9 +29,10 @@ if __name__ == "__main__":
     #SHOW FEATURE POINTS END
 
     #SHOW FEATURE MATCHES BEGIN
-    sift.show_feature_matches()
-    surf.show_feature_matches()
-    orb.show_feature_matches()
+    #sift.show_feature_matches()
+    #surf.show_feature_matches()
+    #orb.show_feature_matches()
     #SHOW FEATURE MATCHES END
+    sift.stitch_images()  
 
 
