@@ -1,15 +1,19 @@
 from audioop import cross
 from pickletools import uint8
 from turtle import right
+import ransac
 import numpy as np
 import cv2
+
+THRESHOLD = 0.9
+NUM_ITERS = 1500
 
 class SIFT:
     def __init__(self, image_array, gray_image_array):
         self.image_array = image_array
         self.gray_image_array = gray_image_array
         self.sift = cv2.xfeatures2d.SIFT_create()
-        self.brute_force_matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
+        self.brute_force_matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
         self.distance_ratio = 0.75
         self.ransac_reproj_threshold = 5
 
@@ -50,109 +54,121 @@ class SIFT:
             cv2.imshow('SIFT FEATURE MATCHES ' + str(image_index) + "-" + str(image_index + 1), result_image)
             cv2.waitKey(0)
 
-    def calculate_homography_matrix(self, train_points, query_points):
-
-        #p = [src_points, dst_points]
-        x_1 = [train_points[0][0],query_points[0][0]]
-        y_1 = [train_points[0][1],query_points[0][1]]
-        x_2 = [train_points[1][0],query_points[1][0]]
-        y_2 = [train_points[1][1],query_points[1][1]]
-        x_3 = [train_points[2][0],query_points[2][0]]
-        y_3 = [train_points[2][1],query_points[2][1]]
-        x_4 = [train_points[3][0],query_points[3][0]]
-        y_4 = [train_points[3][1],query_points[3][1]]
-
-        P = np.array([
-            [-x_1[0], -y_1[0], -1, 0, 0, 0, x_1[0]*x_1[1], y_1[0]*x_1[1], x_1[1]],
-            [0, 0, 0, -x_1[0], -y_1[0], -1, x_1[0]*y_1[1], y_1[0]*y_1[1], y_1[1]],
-            [-x_2[0], -y_2[0], -1, 0, 0, 0, x_2[0]*x_2[1], y_2[0]*x_2[1], x_2[1]],
-            [0, 0, 0, -x_2[0], -y_2[0], -1, x_2[0]*y_2[1], y_2[0]*y_2[1], y_2[1]],
-            [-x_3[0], -y_3[0], -1, 0, 0, 0, x_3[0]*x_3[1], y_3[0]*x_3[1], x_3[1]],
-            [0, 0, 0, -x_3[0], -y_3[0], -1, x_3[0]*y_3[1], y_3[0]*y_3[1], y_3[1]],
-            [-x_4[0], -y_4[0], -1, 0, 0, 0, x_4[0]*x_4[1], y_4[0]*x_4[1], x_4[1]],
-            [0, 0, 0, -x_4[0], -y_4[0], -1, x_4[0]*y_4[1], y_4[0]*y_4[1], y_4[1]],
-            ])
-        [U, S, Vt] = np.linalg.svd(P)
-        return Vt[-1].reshape(3, 3)
-
-    def show_image(im):
-        cv2.imshow("asd", im)
-        cv2.waitKey(0)
-
-    def stitch(self, left_image, right_image):
-        left_image_key_points, left_image_descriptor = self.sift.detectAndCompute(left_image, None)
-        right_image_key_points, right_image_descriptor = self.sift.detectAndCompute(right_image, None)
-
-        matches = self.brute_force_matcher.knnMatch(left_image_descriptor, right_image_descriptor, k=2)            
+    def calculate_homography_matrix(self, pairs):
+        """
+        w*x_d        x_s
+        w*y_d =  H . y_s
+        w            1
         
-        good = []
-        for m in matches:
-            if (m[0].distance < 0.5*m[1].distance):
-                good.append(m)
-        matches = np.asarray(good)
+        """
+        A = []
+        for x_l, y_l, x_r, y_r in pairs:
+            A.append([x_r, y_r, 1, 0, 0, 0, -x_l * x_r, -x_l * y_r, -x_l])
+            A.append([0, 0, 0, x_r, y_r, 1, -y_l * x_r, -y_l * y_r, -y_l])
+        A = np.array(A)
 
-        if (len(matches[:,0]) >= 4):
-            src = np.float32([ left_image_key_points[m.queryIdx].pt for m in matches[:,0] ]).reshape(-1,1,2)
-            dst = np.float32([ right_image_key_points[m.trainIdx].pt for m in matches[:,0] ]).reshape(-1,1,2)
-        else:
-            raise AssertionError('Cant find enough keypoints.')
+        #singular value decomposition 
+        (U, S, V) = np.linalg.svd(A)
 
-        homography_matrix, masked = cv2.findHomography(src, dst, cv2.RANSAC)
+        #V.shape = (9, 9), The last element of the V is the smallest eigenvector.
+        H = np.reshape(V[-1], (3, 3))
+
+        #use w value
+        H = (1 / H.item(8)) * H
+
+        return H
+
+    def dist(self, pair, H):
+        """ Returns the geometric distance between a pair of points given the
+        homography H. """
+        # points in homogeneous coordinates
+        p1 = np.array([pair[0], pair[1], 1])#from left image
+        p2 = np.array([pair[2], pair[3], 1])#from right image
+
+        p2_estimate = np.dot(H, np.transpose(p2))
+        p2_estimate = (1 / p2_estimate[2]) * p2_estimate
         
-        cv2.imshow("l",  left_image)
-        cv2.waitKey(0)
+        return np.sqrt((p1[0] - p2_estimate[0])** 2 + (p1[1] - p2_estimate[1]) ** 2) 
 
-        cv2.imshow("r",  right_image)
-        cv2.waitKey(0)
+    def RANSAC(self, point_map, threshold=THRESHOLD, verbose=True):
+        bestInliers = set()
+        homography = None
+        p = None
+        for i in range(NUM_ITERS):
+            # randomly choose 4 points from the matrix to compute the homography
+            pairs = [point_map[i] for i in np.random.choice(len(point_map), 4)]
 
-        destination = cv2.warpIma(left_image, homography_matrix, (left_image.shape[1] + right_image.shape[1], right_image.shape[0]))
-        cv2.imshow("d",  destination)
-        cv2.waitKey(0)
+            H = self.calculate_homography_matrix(pairs)
+            inliers = {(c[0], c[1], c[2], c[3]) for c in point_map if self.dist(c, H) < 2}
 
-        destination[0: right_image.shape[0], 0: right_image.shape[1]] = right_image
-
-        return destination
+            if len(inliers) > len(bestInliers):
+                print(len(inliers))
+                bestInliers = inliers
+                homography = H
+                p = pairs
+                #if len(bestInliers) > (len(point_map) * threshold): break
+        return homography, pairs
 
 
     def stitch_images(self):
         #the algorithm starts stitching from last image to first image
-        stitched_image = self.gray_image_array[-1]
-        for image_index in range(len(self.gray_image_array) - 1, 1, -1):
+        #[query_image] <-stitch-> [train_image]
+        stitched_image = self.gray_image_array[0]
+        for image_index in range(len(self.gray_image_array) - 1):
             #train image will be changed based on request_image by homography matrix
-            train_image = self.gray_image_array[image_index]
-            query_image = self.gray_image_array[image_index - 1]
+            left_image = self.gray_image_array[image_index]
+            right_image = self.gray_image_array[image_index + 1]
 
             #KEY POINT DETECTION BEGIN
-            train_image_kps, train_image_descs = self.sift.detectAndCompute(train_image, None)
-            query_image_kps, query_image_descs = self.sift.detectAndCompute(query_image, None)
+            left_image_kps, left_image_descs = self.sift.detectAndCompute(left_image, None)
+            right_image_kps, right_image_descs = self.sift.detectAndCompute(right_image, None)
             #KEY POINT DETECTION END
 
             #KEY POINT MATCHING BEGIN
-            raw_matches = self.brute_force_matcher.knnMatch(query_image_descs, train_image_descs, k=2)     
-            matches = []
-            for m1, m2 in raw_matches:
-                if m1.distance < m2.distance * self.distance_ratio:
-                    matches.append(m1)
+            #match: query_image -> train_image
+            raw_matches = self.brute_force_matcher.match(left_image_descs, right_image_descs)   
+            """
+            result_image = cv2.drawMatches(left_image, left_image_kps,
+                                     right_image, right_image_kps,
+                                     raw_matches, 
+                                     None,flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
             
-            #number of matches must be bigger than 4 to create homography matrix
-            if len(matches) < 4:
-                raise ("Number of matches is smaller than 4!")
+            cv2.imshow('SIFT FEATURE MATCHES ', result_image)
+            cv2.waitKey(0)
+            """
+            
             #KEY POINT MATCHING END
             
             #HOMOGRAPHY MATRIX BEGIN
-            train_image_kps_list = np.float32([kp.pt for kp in train_image_kps])
-            query_image_kps_list = np.float32([kp.pt for kp in query_image_kps])
+            #ransac.ransac(train_points.copy(), query_points.copy())
 
-            train_points = np.float32([train_image_kps_list[match.trainIdx] for match in matches]) 
-            query_points = np.float32([query_image_kps_list[match.queryIdx] for match in matches])
-            
-            H = self.calculate_homography_matrix(train_points, query_points)#, cv2.RANSAC, ransacReprojThreshold=self.ransac_reproj_threshold)
             #(H, _) = cv2.findHomography(train_points, query_points, cv2.RANSAC, self.ransac_reproj_threshold)
+            #print(H)
+            combined_matches = np.array([[
+                left_image_kps[match.queryIdx].pt[0],
+                left_image_kps[match.queryIdx].pt[1],
+                right_image_kps[match.trainIdx].pt[0],
+                right_image_kps[match.trainIdx].pt[1]] for match in raw_matches])
+            
+            H, pairs = self.RANSAC(combined_matches)
+
+            for c1, c2, c3, c4 in pairs:
+                ss = cv2.circle(left_image, (int(c1), int(c2)), 3, (0, 0, 0), 4)
+                cv2.imshow("--aa", ss)
+                cv2.waitKey(0)
+                ss = cv2.circle(right_image, (int(c3), int(c4)), 3, (0, 0, 0), 4)
+                cv2.imshow("--ab", ss)
+                cv2.waitKey(0)
+
+            #H = self.calculate_homography_matrix(train_points[10: 14], query_points[10: 14])#, cv2.RANSAC, ransacReprojThreshold=self.ransac_reproj_threshold)
             #HOMOGRAPHY MATRIX END
 
             #IMAGE WARPING BEGIN
-            stitched_image = cv2.warpPerspective(stitched_image, H, (query_image.shape[1] + stitched_image.shape[1], query_image.shape[0]))
-            stitched_image[0: query_image.shape[0], 0: query_image.shape[1]] = query_image
+            stitched_image = cv2.warpPerspective(right_image, H, (right_image.shape[1] + left_image.shape[1], right_image.shape[0]))
+            cv2.imshow("a-", stitched_image)
+            cv2.waitKey(0)
+            stitched_image[0: left_image.shape[0], 0: left_image.shape[1]] = left_image
+    
             #IMAGE WARPING END
 
         cv2.imshow("--", stitched_image)
