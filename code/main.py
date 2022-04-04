@@ -31,7 +31,7 @@ if __name__ == "__main__":
     gray_image_array = []
     #TODO: This code must be changed based on max and min image id.
     #TODO: Add a console UI to control the sw
-    for ix in range(4, 10):
+    for ix in range(4, 30):
         image_file_name = "dataset/cyl_image" + ( "0" + str(ix)  if ix < 10 else str(ix)) + ".png"
         image_array.append(imread(image_file_name))  
         gray_image_array.append(cvtColor(image_array[-1], COLOR_BGR2GRAY))      

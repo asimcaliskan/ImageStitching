@@ -11,7 +11,7 @@ class SURF:
         self.gray_image_array = gray_image_array
         self.number_of_images = len(self.gray_image_array)
         self.surf = cv2.xfeatures2d.SURF_create(400)
-        self.brute_force_matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
+        self.brute_force_matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
 
     def show_feature_points(self):
         for image_index in range(len(self.gray_image_array) - 1):
